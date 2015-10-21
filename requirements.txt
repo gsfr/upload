@@ -2,4 +2,3 @@ Paste
 pyOpenSSL
 webapp2
 WebOb
-git+https://github.com/WoLpH/python-progressbar.git

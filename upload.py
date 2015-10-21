@@ -6,17 +6,15 @@ from __future__ import print_function
 
 import os
 import cgi
-import sys
 import json
-import uuid
+import hashlib
 import webapp2
 import argparse
-import progressbar
 import paste.httpserver
 
 import logging
 logging.basicConfig(
-    format='%(asctime)s %(name)16.16s:%(levelname)4.4s %(message)s',
+    format='%(asctime)s %(name)8.8s:%(levelname)4.4s %(message)s',
     datafmt='%Y-%m-%d %H:%M:%S',
 )
 log = logging.getLogger('upload')
@@ -62,7 +60,7 @@ class Upload(webapp2.RequestHandler):
                 elif fieldname == 'metadata':
                     try:
                         metadata = json.loads(field.value)
-                        log.info('metadata    %s' % str(metadata))
+                        log.info('metadata: %s' % str(metadata))
                     except ValueError:
                         self.abort(400, 'non-JSON value in "metadata" parameter')
             if filestream is None:
@@ -72,17 +70,17 @@ class Upload(webapp2.RequestHandler):
         filename = os.path.basename(filename)
         with tempfile.TemporaryDirectory(prefix='.tmp', dir=self.app.path) as tempdir_path:
             upload_filepath = os.path.join(tempdir_path, filename)
-            filesize = self.request.content_length
-            progress_widgets = [progressbar.Percentage(), progressbar.Bar(), progressbar.FileTransferSpeed()]
             with open(upload_filepath, 'wb') as upload_file:
-                with progressbar.ProgressBar(max_value=filesize, widgets=progress_widgets) as progress:
-                    for chunk in iter(lambda: filestream.read(2**20), ''):
-                        upload_file.write(chunk)
-                        progress.update(progress.value + len(chunk))
-                print('', file=sys.stderr)
-            throughput = filesize / progress.data()['time_elapsed'].total_seconds()
-            log.info('received    %s [%s, %s/s] from %s' % (filename, hrsize(filesize), hrsize(throughput), upload_source))
-            os.rename(upload_filepath, os.path.join(self.app.path, str(uuid.uuid1()) + '_' + filename)) # add UUID to prevent clobbering files
+                filesize = 0
+                sha1 = hashlib.sha1()
+                log.debug('hashing data and streaming to disk...')
+                for chunk in iter(lambda: filestream.read(2**20), ''):
+                    sha1.update(chunk)
+                    filesize += len(chunk)
+                    upload_file.write(chunk)
+            log.info('received %s [%s] from %s' % (filename, hrsize(filesize), upload_source))
+            log.debug('sha1: ' + sha1.hexdigest())
+            os.rename(upload_filepath, os.path.join(self.app.path, sha1.hexdigest() + '_' + filename))
         print()
 
 
@@ -92,7 +90,7 @@ arg_parser.add_argument('--host', default='127.0.0.1', help='IP address to bind 
 arg_parser.add_argument('--port', default='8080', help='TCP port to listen on')
 arg_parser.add_argument('--ssl', action='store_true', help='enable SSL')
 arg_parser.add_argument('--ssl_cert', default='*', help='path to SSL key and cert file')
-arg_parser.add_argument('--log_level', help='log level [info]', default='info')
+arg_parser.add_argument('--log_level', help='log level [debug]', default='debug')
 args = arg_parser.parse_args()
 
 args.ssl = args.ssl or args.ssl_cert != '*'
