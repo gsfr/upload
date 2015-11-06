@@ -7,9 +7,11 @@ from __future__ import print_function
 import os
 import cgi
 import json
+import psutil
 import hashlib
 import webapp2
 import argparse
+import resource
 import paste.httpserver
 
 import logging
@@ -33,55 +35,80 @@ def hrsize(size):
             return '%.0f%sB' % (size, suffix)
     return '%.0f%sB' % (size, 'Y')
 
+
+class HashingFile(file):
+    def __init__(self, file_path):
+        super(HashingFile, self).__init__(file_path, "w+b")
+        self.sha1 = hashlib.sha1()
+
+    def write(self, data):
+        self.sha1.update(data)
+        return file.write(self, data)
+
+    def get_hash(self):
+        return self.sha1.hexdigest()
+
+
+def getHashingFieldStorage(upload_dir):
+    class HashingFieldStorage(cgi.FieldStorage):
+        def make_file(self, binary=None):
+            self.open_file = HashingFile(os.path.join(upload_dir, self.filename))
+            return self.open_file
+
+        def get_hash(self):
+            return self.open_file.get_hash()
+
+    return HashingFieldStorage
+
+
 class Upload(webapp2.RequestHandler):
 
     def get(self):
         self.response.write('Simple uploader\n')
 
-    def post(self, filename='upload.dat'):
-        return self.put(filename)
+    def post(self):
+        return self.put()
 
-    def put(self, filename='upload.dat'):
+    def put(self):
+        before = resource.getrusage(resource.RUSAGE_SELF)
+        before_io = psutil.disk_io_counters()
+
         upload_source = '%s (%s)' % (self.request.user_agent, self.request.client_addr)
         log.debug('incoming upload from ' + upload_source)
-        if self.request.content_type == 'multipart/form-data':
-            filestream = None
-            # use cgi lib to parse multipart data without loading all into memory; use tempfile instead
-            # FIXME avoid using tempfile; processs incoming stream on the fly
+        log.debug('type: ' + self.request.content_type)
+
+        if (self.request.content_type == 'multipart/form-data'):
             fs_environ = self.request.environ.copy()
             fs_environ.setdefault('CONTENT_LENGTH', '0')
             fs_environ['QUERY_STRING'] = ''
-            form = cgi.FieldStorage(fp=self.request.body_file, environ=fs_environ, keep_blank_values=True)
-            for fieldname in form:
-                field = form[fieldname]
-                if fieldname == 'file':
-                    filestream = field.file
-                    filename = field.filename
-                elif fieldname == 'metadata':
-                    try:
-                        metadata = json.loads(field.value)
-                        log.info('metadata: %s' % str(metadata))
-                    except ValueError:
-                        self.abort(400, 'non-JSON value in "metadata" parameter')
-            if filestream is None:
-                self.abort(400, 'multipart/form-data must contain a "file" field')
+
+            # Any incoming file(s) are hashed and written to disk on construction of the HashingFieldStorage class
+            form = getHashingFieldStorage(self.app.path)(fp=self.request.body_file, environ=fs_environ, keep_blank_values=True)
+
+            received_file = form['file']
+            received_sha = received_file.get_hash()
+            received_filename = received_file.filename
+            received_size = os.path.getsize(os.path.join(self.app.path, received_filename))
+
         else:
-            filestream = self.request.body_file
-        filename = os.path.basename(filename)
-        with tempfile.TemporaryDirectory(prefix='.tmp', dir=self.app.path) as tempdir_path:
-            upload_filepath = os.path.join(tempdir_path, filename)
-            with open(upload_filepath, 'wb') as upload_file:
-                filesize = 0
-                sha1 = hashlib.sha1()
-                log.debug('hashing data and streaming to disk...')
-                for chunk in iter(lambda: filestream.read(2**20), ''):
-                    sha1.update(chunk)
-                    filesize += len(chunk)
-                    upload_file.write(chunk)
-            log.info('received %s [%s] from %s' % (filename, hrsize(filesize), upload_source))
-            log.debug('sha1: ' + sha1.hexdigest())
-            os.rename(upload_filepath, os.path.join(self.app.path, sha1.hexdigest() + '_' + filename))
-        print()
+            received_filename = 'upload.dat'
+            received_file = HashingFile(os.path.join(self.app.path, received_filename))
+            for chunk in iter(lambda: self.request.body_file.read(2**20), ''):
+                received_file.write(chunk)
+            received_sha = received_file.get_hash()
+            received_size = os.path.getsize(os.path.join(self.app.path, received_filename))
+
+        log.debug('received %s [%s] from %s' % (received_filename, hrsize(received_size), upload_source))
+        log.debug('sha1: ' + received_sha)
+        os.rename(
+            os.path.join(self.app.path, received_filename),
+            os.path.join(self.app.path, received_sha + '_' + received_filename))
+
+        after = resource.getrusage(resource.RUSAGE_SELF)
+        after_io = psutil.disk_io_counters()
+        print('Memory Used (High-water mark): %s' % (hrsize(after.ru_maxrss)))
+        print('CPU Time: %d seconds' % ((after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)))
+        print('Disk I/O: %s bytes written, %s bytes read' % (hrsize(after_io.write_bytes - before_io.write_bytes), hrsize(after_io.read_bytes - before_io.read_bytes)))
 
 
 arg_parser = argparse.ArgumentParser()
