@@ -39,11 +39,19 @@ def hrsize(size):
 class HashingFile(file):
     def __init__(self, file_path):
         super(HashingFile, self).__init__(file_path, "w+b")
+        self.file_path = file_path
         self.sha1 = hashlib.sha1()
+        self.length = 0
 
     def write(self, data):
         self.sha1.update(data)
+        self.length += len(data)
         return file.write(self, data)
+
+    def __del__(self):
+        os.rename(
+            self.file_path,
+            os.path.join(os.path.dirname(self.file_path), self.get_hash() + '_' + os.path.basename(self.file_path)))
 
     def get_hash(self):
         return self.sha1.hexdigest()
@@ -60,6 +68,9 @@ def getHashingFieldStorage(upload_dir):
 
     return HashingFieldStorage
 
+def printSummary(filename, size, source, sha):
+    log.debug('received %s [%s] from %s' % (filename, hrsize(size), source))
+    log.debug('sha1: ' + sha)
 
 class Upload(webapp2.RequestHandler):
 
@@ -85,24 +96,23 @@ class Upload(webapp2.RequestHandler):
             # Any incoming file(s) are hashed and written to disk on construction of the HashingFieldStorage class
             form = getHashingFieldStorage(self.app.path)(fp=self.request.body_file, environ=fs_environ, keep_blank_values=True)
 
-            received_file = form['file']
-            received_sha = received_file.get_hash()
-            received_filename = received_file.filename
-            received_size = os.path.getsize(os.path.join(self.app.path, received_filename))
-
+            for key in form.keys():
+                received_file = form[key].file
+                if received_file and form[key].filename:
+                    received_sha = received_file.get_hash()
+                    received_filename = form[key].filename
+                    received_size = received_file.length
+                    printSummary(received_filename, received_size, upload_source, received_sha)
+                else:
+                    log.debug('Got metadata: ' + str(form[key].value))
         else:
             received_filename = 'upload.dat'
             received_file = HashingFile(os.path.join(self.app.path, received_filename))
             for chunk in iter(lambda: self.request.body_file.read(2**20), ''):
                 received_file.write(chunk)
             received_sha = received_file.get_hash()
-            received_size = os.path.getsize(os.path.join(self.app.path, received_filename))
-
-        log.debug('received %s [%s] from %s' % (received_filename, hrsize(received_size), upload_source))
-        log.debug('sha1: ' + received_sha)
-        os.rename(
-            os.path.join(self.app.path, received_filename),
-            os.path.join(self.app.path, received_sha + '_' + received_filename))
+            received_size = received_file.length
+            printSummary(received_filename, received_size, upload_source, received_sha)
 
         after = resource.getrusage(resource.RUSAGE_SELF)
         after_io = psutil.disk_io_counters()
